@@ -8,8 +8,16 @@ Multi-Copy-System is a lightweight Windows clipboard manager. It keeps up to fiv
 
 ### Download
 
-1. Open [GitHub Releases](https://github.com/kkkk12233123/Multi-Copy-System/releases) and download the Windows ZIP from **Assets** when a release is available. Use the build instructions below to create the executables from source.
-2. Extract the ZIP to a folder you plan to keep. Keep `MultiCopySystem.exe` and `MultiCopySettings.exe` together.
+1. Open [GitHub Releases](https://github.com/kkkk12233123/Multi-Copy-System/releases) and download `Multi-Copy-System-windows-x64.zip` from **Assets** when a release is available. Use the build instructions below to create the executables from source.
+2. Extract the ZIP to a folder you plan to keep. Both executables are directly inside the extraction folder. Keep them together.
+
+   ```text
+   <extraction folder>/
+   ├── MultiCopySystem.exe
+   ├── MultiCopySettings.exe
+   └── README.md
+   ```
+
 3. Run `MultiCopySystem.exe`. It stays in the Windows notification area. Run `MultiCopySettings.exe` or open **Settings** (`設定を開く`) from the tray icon.
 4. To start automatically, select **Settings** (`設定`) → **Start at Windows sign-in** (`Windows サインイン時に常駐アプリを起動`) and save. The app runs under your current Windows account.
 
@@ -34,14 +42,21 @@ Each clipboard item can be up to 16 MiB. Supported items are plain Unicode text 
 
 ### Build from source
 
-Download the source with **Code → Download ZIP** on the [repository page](https://github.com/kkkk12233123/Multi-Copy-System), or clone it with Git. From a terminal with Visual Studio 2022 or later, the C++ desktop build tools, a Windows SDK, and CMake available, run:
+Download the source with **Code → Download ZIP** on the [repository page](https://github.com/kkkk12233123/Multi-Copy-System), or clone it with Git. Run the following commands from the folder containing `CMakeLists.txt`, using a terminal with Visual Studio 2022 or later, the C++ desktop build tools, a Windows SDK, and CMake available.
 
 ```powershell
 cmake -S . -B build -A x64
 cmake --build build --config Release
 ```
 
-Run the two executables from `build/Release`. The x64 build targets Windows 10 (version 1703 or later) and Windows 11.
+The build creates these paths relative to the folder containing `CMakeLists.txt`.
+
+```text
+build/Release/MultiCopySystem.exe
+build/Release/MultiCopySettings.exe
+```
+
+The x64 build targets Windows 10 (version 1703 or later) and Windows 11.
 
 To remove the app, turn off sign-in launch, clear its stored data in **Settings**, exit it from the notification area, and delete the extracted folder.
 
@@ -51,8 +66,16 @@ Multi-Copy-System は Windows 向けの軽量なクリップボード管理ツ�
 
 ### ダウンロード
 
-1. [GitHub Releases](https://github.com/kkkk12233123/Multi-Copy-System/releases)で、リリース公開後に **Assets** から Windows 用のZIPをダウンロードします。ソースから実行ファイルを作る方法は下記に記載しています。
-2. ZIP を使い続けるフォルダーに展開します。`MultiCopySystem.exe` と `MultiCopySettings.exe` は同じフォルダーに置きます。
+1. リリース公開後、[GitHub Releases](https://github.com/kkkk12233123/Multi-Copy-System/releases)の **Assets** から `Multi-Copy-System-windows-x64.zip` をダウンロードします。ソースから実行ファイルを作る方法は下記に記載しています。
+2. ZIP を使い続けるフォルダーに展開します。2つのEXEは展開先フォルダーの直下にあります。そのまま同じフォルダーに置いて使います。
+
+   ```text
+   展開先フォルダー/
+   ├── MultiCopySystem.exe
+   ├── MultiCopySettings.exe
+   └── README.md
+   ```
+
 3. `MultiCopySystem.exe` を起動すると、通知領域に常駐します。設定を開くには `MultiCopySettings.exe` を実行するか、通知領域のアイコンを右クリックして **設定を開く** を選びます。
 4. 自動起動を使うには、**設定** タブで **Windows サインイン時に常駐アプリを起動** をオンにして **設定を保存** を押します。
 
@@ -77,13 +100,20 @@ Multi-Copy-System は Windows 向けの軽量なクリップボード管理ツ�
 
 ### ソースからビルド
 
-[リポジトリ](https://github.com/kkkk12233123/Multi-Copy-System)の **Code → Download ZIP** でソースを入手するか、Gitでクローンします。Visual Studio 2022以降、C++ デスクトップ開発ツール、Windows SDK、CMake が使える端末で実行します。
+[リポジトリ](https://github.com/kkkk12233123/Multi-Copy-System)の **Code → Download ZIP** でソースを入手するか、Gitでクローンします。Visual Studio 2022以降、C++ デスクトップ開発ツール、Windows SDK、CMake が使える端末で、`CMakeLists.txt` のあるフォルダーから以下を実行します。
 
 ```powershell
 cmake -S . -B build -A x64
 cmake --build build --config Release
 ```
 
-`build/Release` に出力される2つの実行ファイルを使います。x64版の対象OSは Windows 10（バージョン1703以降）と Windows 11 です。
+ビルド後は、`CMakeLists.txt` のあるフォルダーを基準に以下の場所にEXEが出力されます。
+
+```text
+build/Release/MultiCopySystem.exe
+build/Release/MultiCopySettings.exe
+```
+
+x64版の対象OSは Windows 10（バージョン1703以降）と Windows 11 です。
 
 削除する場合は、設定で自動起動をオフにして保存データを全消去し、通知領域のメニューから終了して、展開先のフォルダーを削除します。
