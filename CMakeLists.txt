@@ -11,6 +11,7 @@ add_executable(MultiCopySystem WIN32
     src/main.cpp
     src/input.cpp
     src/picker.cpp
+    src/caret.cpp
     src/clipboard.cpp
     src/storage.cpp
 )
@@ -42,4 +43,5 @@ foreach(target IN ITEMS MultiCopySystem MultiCopySettings)
     target_link_libraries(${target} PRIVATE user32 gdi32 shell32 advapi32)
 endforeach()
 
+target_link_libraries(MultiCopySystem PRIVATE ole32 oleaut32)
 target_link_libraries(MultiCopySettings PRIVATE comctl32)

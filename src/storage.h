@@ -12,15 +12,18 @@ struct Shortcut {
     UINT key = 0;
 };
 
+inline constexpr std::size_t kFileShortcutIndex = 4;
+
 struct Settings {
     int previewLimit = 24;
     bool bottomRight = false;
     bool paused = false;
-    std::array<Shortcut, 4> shortcuts{{
+    std::array<Shortcut, kFileShortcutIndex + 1> shortcuts{{
         {MOD_CONTROL | MOD_SHIFT, L'V'},
         {MOD_CONTROL, L'1'},
         {MOD_CONTROL, L'2'},
         {MOD_CONTROL, L'3'},
+        {MOD_CONTROL | MOD_SHIFT, L'F'},
     }};
 };
 

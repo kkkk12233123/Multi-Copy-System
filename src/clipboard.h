@@ -14,7 +14,7 @@
 
 namespace mcs {
 
-enum class ClipKind { Text, Image };
+enum class ClipKind { Text, Image, Files = 2 };
 enum class ImageFormat { Dib, DibV5, Png };
 
 struct ClipData {
@@ -22,6 +22,7 @@ struct ClipData {
     std::wstring text;
     ImageFormat imageFormat = ImageFormat::Dib;
     std::vector<std::uint8_t> image;
+    std::vector<std::wstring> files;
 };
 
 inline constexpr std::size_t kMaxClipBytes = 16 * 1024 * 1024;
@@ -38,5 +39,6 @@ bool WriteClipboard(HWND window, const ClipData& clip);
 std::size_t ClipBytes(const ClipData& clip);
 bool IsValidClip(const ClipData& clip);
 std::wstring ClipTextPreview(std::wstring_view text, int characterLimit);
+std::wstring ClipFilesPreview(const ClipData& clip, int characterLimit);
 
 } // namespace mcs

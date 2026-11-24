@@ -37,7 +37,7 @@ private:
     std::thread thread_;
     DWORD threadId_ = 0;
     HHOOK mouseHook_ = nullptr;
-    std::array<std::atomic<DWORD>, 4> shortcuts_{};
+    std::array<std::atomic<DWORD>, kFileShortcutIndex + 1> shortcuts_{};
     std::atomic<unsigned> savedSlots_{0};
     std::atomic<bool> paused_{false};
     std::array<bool, 256> down_{};

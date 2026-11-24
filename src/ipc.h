@@ -25,7 +25,7 @@ struct HistoryRow {
 
 struct HistorySnapshot {
     UINT count;
-    HistoryRow rows[10];
+    HistoryRow rows[20];
 };
 
 }

@@ -1,13 +1,15 @@
 #include "picker.h"
 
+#include "caret.h"
 #include "clipboard.h"
 
 #include <windowsx.h>
 
 #include <algorithm>
+#include <atomic>
 #include <iterator>
-#include <optional>
 #include <string_view>
+#include <utility>
 
 namespace mcs {
 namespace {
@@ -19,36 +21,24 @@ constexpr COLORREF kBorder = RGB(172, 174, 179);
 constexpr COLORREF kDivider = RGB(219, 220, 224);
 constexpr COLORREF kSelection = RGB(255, 247, 216);
 constexpr UINT kLabelFlags = DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX;
+constexpr UINT kAnchorReady = WM_APP + 55;
+constexpr UINT_PTR kAnchorFallbackTimer = 1;
+constexpr UINT kFallbackDelayMs = 75;
+constexpr ULONGLONG kLateAnchorLimitMs = 300;
 
-std::optional<RECT> CaretBounds(HWND targetWindow) {
-    const DWORD thread = GetWindowThreadProcessId(targetWindow, nullptr);
-    GUITHREADINFO gui{};
-    gui.cbSize = sizeof(gui);
-    if (!thread || !GetGUIThreadInfo(thread, &gui) || !gui.hwndCaret ||
-        gui.rcCaret.bottom <= gui.rcCaret.top) {
-        return std::nullopt;
+POINT WindowAnchor(HWND target, const RECT& bounds) {
+    POINT pointer{};
+    if (GetPhysicalCursorPos(&pointer)) {
+        const HWND hovered = WindowFromPoint(pointer);
+        if (hovered && GetAncestor(hovered, GA_ROOT) == target && PtInRect(&bounds, pointer)) {
+            return pointer;
+        }
+        if (!PtInRect(&bounds, pointer)) {
+            return {std::clamp(pointer.x, bounds.left, bounds.right - 1),
+                    std::clamp(pointer.y, bounds.top, bounds.bottom - 1)};
+        }
     }
-
-    POINT topLeft{gui.rcCaret.left, gui.rcCaret.top};
-    POINT bottomLeft{gui.rcCaret.left, gui.rcCaret.bottom};
-    const DPI_AWARENESS_CONTEXT context = GetWindowDpiAwarenessContext(gui.hwndCaret);
-    const DPI_AWARENESS_CONTEXT previousContext = SetThreadDpiAwarenessContext(context);
-    if (!previousContext) {
-        return std::nullopt;
-    }
-
-    // GetGUIThreadInfo reports coordinates in the caret window's own DPI context.
-    const bool mapped = ClientToScreen(gui.hwndCaret, &topLeft) &&
-                        ClientToScreen(gui.hwndCaret, &bottomLeft);
-    SetThreadDpiAwarenessContext(previousContext);
-    if (!mapped ||
-        (GetAwarenessFromDpiAwarenessContext(context) != DPI_AWARENESS_PER_MONITOR_AWARE &&
-         (!LogicalToPhysicalPointForPerMonitorDPI(gui.hwndCaret, &topLeft) ||
-          !LogicalToPhysicalPointForPerMonitorDPI(gui.hwndCaret, &bottomLeft)))) {
-        return std::nullopt;
-    }
-
-    return RECT{topLeft.x, topLeft.y, topLeft.x, bottomLeft.y};
+    return {bounds.left + (bounds.right - bounds.left) / 2, bounds.top + (bounds.bottom - bounds.top) / 2};
 }
 
 HFONT CreatePickerFont(int height) {
@@ -97,6 +87,15 @@ void DrawImageGlyph(HDC dc, RECT bounds, COLORREF color, int stroke, int roundin
 
 }  // namespace
 
+struct Picker::AnchorQuery {
+    HWND window;
+    HWND target;
+    UINT_PTR generation;
+    ULONGLONG started;
+    std::optional<RECT> caret;
+    std::atomic<bool> finished{false};
+};
+
 Picker::~Picker() {
     if (window_) {
         DestroyWindow(window_);
@@ -133,40 +132,112 @@ bool Picker::Initialize(HINSTANCE instance, HWND owner, UINT hoverMessage) {
 }
 
 void Picker::Show(const std::vector<PickerItem>& items, int selected, int previewLimit,
-                  bool bottomRight, HWND targetWindow) {
+                  bool bottomRight, HWND targetWindow, bool filesOnly) {
     if (!window_) {
         return;
     }
 
     Hide();
+    filesOnly_ = filesOnly;
+    bottomRight_ = bottomRight;
+    targetWindow_ = targetWindow ? targetWindow : GetForegroundWindow();
     for (std::size_t index = 0; index < items.size(); ++index) {
         const auto& item = items[index];
-        if (!item.clip || item.number < 1 || item.number > kSlotCount) {
+        if (!item.clip || item.number < 1 || item.number > kSlotCount
+            || (item.clip->kind == ClipKind::Files) != filesOnly_) {
             continue;
         }
 
-        auto& slot = (item.clip->kind == ClipKind::Text ? textSlots_ : imageSlots_)[item.number - 1];
+        auto& slot = (item.clip->kind == ClipKind::Image ? imageSlots_ : listSlots_)[item.number - 1];
         slot.itemIndex = static_cast<int>(index);
-        if (item.clip->kind == ClipKind::Text) {
-            hasText_ = true;
+        switch (item.clip->kind) {
+        case ClipKind::Text:
+            hasList_ = true;
             slot.preview = ClipTextPreview(item.clip->text, previewLimit);
             if (slot.preview.find_first_not_of(L" \t\r\n") == std::wstring::npos) {
                 slot.preview = L"（空白）";
             }
-        } else {
+            break;
+        case ClipKind::Image:
             hasImages_ = true;
+            break;
+        case ClipKind::Files:
+            hasList_ = true;
+            slot.preview = ClipFilesPreview(*item.clip, previewLimit);
+            break;
         }
     }
     selected_ = selected;
 
-    if (!targetWindow) {
-        targetWindow = GetForegroundWindow();
+    const auto caret = bottomRight_ ? std::nullopt : Win32CaretBounds(targetWindow_);
+    if (!caret && !bottomRight_ && targetWindow_ && RequestAnchor()) {
+        if (SetTimer(window_, kAnchorFallbackTimer, kFallbackDelayMs, nullptr)) {
+            return;
+        }
     }
-    auto caret = bottomRight ? std::nullopt : CaretBounds(targetWindow);
-    HMONITOR monitor = caret ? MonitorFromPoint({caret->left, caret->top}, MONITOR_DEFAULTTONULL) : nullptr;
+    Present(caret);
+}
+
+bool Picker::RequestAnchor() {
+    if (const auto worker = anchorWorker_.lock(); worker && !worker->finished.load(std::memory_order_acquire)) {
+        return false;
+    }
+    auto query = std::make_shared<AnchorQuery>(window_, targetWindow_, ++anchorGeneration_, GetTickCount64());
+    auto* context = new std::shared_ptr<AnchorQuery>(query);
+    if (!TrySubmitThreadpoolCallback(ResolveAnchor, context, nullptr)) {
+        delete context;
+        return false;
+    }
+    anchorWorker_ = query;
+    anchorQuery_ = std::move(query);
+    return true;
+}
+
+void CALLBACK Picker::ResolveAnchor(PTP_CALLBACK_INSTANCE, void* context) {
+    const std::unique_ptr<std::shared_ptr<AnchorQuery>> argument(static_cast<std::shared_ptr<AnchorQuery>*>(context));
+    const auto& query = *argument;
+    query->caret = AutomationCaretBounds(query->target);
+    query->finished.store(true, std::memory_order_release);
+    PostMessageW(query->window, kAnchorReady, query->generation, 0);
+}
+
+void Picker::AnchorReady(UINT_PTR generation) {
+    if (!anchorQuery_ || anchorQuery_->generation != generation || !anchorQuery_->finished.load(std::memory_order_acquire)) {
+        return;
+    }
+    const auto query = std::exchange(anchorQuery_, {});
+    KillTimer(window_, kAnchorFallbackTimer);
+    if (GetForegroundWindow() != targetWindow_) {
+        Hide();
+        return;
+    }
+    if (!IsWindowVisible(window_)) {
+        Present(query->caret);
+        return;
+    }
+    POINT mouse{};
+    const bool unchanged = !hasMousePosition_ || (GetPhysicalCursorPos(&mouse)
+        && mouse.x == lastMousePosition_.x && mouse.y == lastMousePosition_.y);
+    if (query->caret && unchanged && GetTickCount64() - query->started <= kLateAnchorLimitMs) {
+        Present(query->caret);
+    }
+}
+
+void Picker::Present(std::optional<RECT> caret) {
+    if (targetWindow_ && GetForegroundWindow() != targetWindow_) {
+        return;
+    }
+    RECT targetBounds{};
+    const bool hasTarget = GetWindowRect(targetWindow_, &targetBounds) && !IsRectEmpty(&targetBounds);
+    const bool useTargetAnchor = !bottomRight_ && !caret && hasTarget;
+    auto anchor = caret;
+    if (useTargetAnchor) {
+        const POINT point = WindowAnchor(targetWindow_, targetBounds);
+        anchor = RECT{point.x, point.y, point.x, point.y};
+    }
+    HMONITOR monitor = anchor ? MonitorFromPoint({anchor->left, anchor->top}, MONITOR_DEFAULTTONULL) : nullptr;
     if (!monitor) {
-        caret.reset();
-        monitor = MonitorFromWindow(targetWindow, MONITOR_DEFAULTTOPRIMARY);
+        monitor = MonitorFromWindow(targetWindow_, MONITOR_DEFAULTTOPRIMARY);
     }
 
     MONITORINFO monitorInfo{};
@@ -188,14 +259,28 @@ void Picker::Show(const std::vector<PickerItem>& items, int selected, int previe
     const int height = std::min(Layout(width), static_cast<int>(work.bottom - work.top));
     const int inset = Scale(12);
     POINT position{work.right - width - inset, work.bottom - height - inset};
-    if (caret) {
-        const int gap = Scale(5);
-        const LONG below = caret->bottom + gap;
-        const LONG above = caret->top - gap - height;
-        position = {caret->left, below + height > work.bottom && above >= work.top ? above : below};
+    RECT limits = work;
+    if (useTargetAnchor) {
+        RECT visible{};
+        if (IntersectRect(&visible, &targetBounds, &work)) {
+            if (visible.right - visible.left >= width) {
+                limits.left = visible.left;
+                limits.right = visible.right;
+            }
+            if (visible.bottom - visible.top >= height) {
+                limits.top = visible.top;
+                limits.bottom = visible.bottom;
+            }
+        }
     }
-    position.x = std::clamp(position.x, work.left, work.right - width);
-    position.y = std::clamp(position.y, work.top, work.bottom - height);
+    if (anchor) {
+        const int gap = Scale(5);
+        const LONG below = anchor->bottom + gap;
+        const LONG above = anchor->top - gap - height;
+        position = {anchor->left, below + height > limits.bottom && above >= limits.top ? above : below};
+    }
+    position.x = std::clamp(position.x, limits.left, limits.right - width);
+    position.y = std::clamp(position.y, limits.top, limits.bottom - height);
 
     const int rounding = Scale(20);
     if (const HRGN region = CreateRoundRectRgn(0, 0, width, height, rounding, rounding)) {
@@ -204,7 +289,7 @@ void Picker::Show(const std::vector<PickerItem>& items, int selected, int previe
         }
     }
 
-    hasMousePosition_ = GetCursorPos(&lastMousePosition_) != FALSE;
+    hasMousePosition_ = GetPhysicalCursorPos(&lastMousePosition_) != FALSE;
     SetWindowPos(window_, HWND_TOPMOST, position.x, position.y, width, height,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
     InvalidateRect(window_, nullptr, FALSE);
@@ -214,6 +299,9 @@ void Picker::Select(int selected) {
     if (selected_ != selected) {
         selected_ = selected;
         if (window_) {
+            if (IsWindowVisible(window_)) {
+                anchorQuery_.reset();
+            }
             InvalidateRect(window_, nullptr, FALSE);
         }
     }
@@ -221,7 +309,7 @@ void Picker::Select(int selected) {
 
 int Picker::NewHoveredItem() const {
     POINT position{};
-    if (!window_ || !IsWindowVisible(window_) || !GetCursorPos(&position) ||
+    if (!window_ || !IsWindowVisible(window_) || !GetPhysicalCursorPos(&position) ||
         (hasMousePosition_ && position.x == lastMousePosition_.x && position.y == lastMousePosition_.y) ||
         !ScreenToClient(window_, &position)) {
         return -1;
@@ -230,15 +318,22 @@ int Picker::NewHoveredItem() const {
 }
 
 void Picker::Hide() {
+    if (window_) {
+        KillTimer(window_, kAnchorFallbackTimer);
+    }
     if (window_ && IsWindowVisible(window_)) {
         ShowWindow(window_, SW_HIDE);
     }
-    textSlots_ = {};
+    targetWindow_ = nullptr;
+    anchorQuery_.reset();
+    listSlots_ = {};
     imageSlots_ = {};
     divider_ = {};
     emptyRow_ = {};
-    hasText_ = false;
+    hasList_ = false;
     hasImages_ = false;
+    filesOnly_ = false;
+    bottomRight_ = false;
     hasMousePosition_ = false;
     selected_ = -1;
 }
@@ -266,10 +361,10 @@ void Picker::SetFonts(UINT dpi) {
 int Picker::PreferredWidth() const {
     const int minimum = Scale(hasImages_ ? 256 : 204);
     int textWidth = 0;
-    if (hasText_) {
+    if (hasList_) {
         if (const HDC dc = GetDC(window_)) {
             const HGDIOBJ previousFont = SelectPickerFont(dc, textFont_);
-            for (const auto& slot : textSlots_) {
+            for (const auto& slot : listSlots_) {
                 SIZE size{};
                 if (!slot.preview.empty() && GetTextExtentPoint32W(
                         dc, slot.preview.data(), static_cast<int>(slot.preview.size()), &size)) {
@@ -288,15 +383,15 @@ int Picker::Layout(int width) {
     const int rowHeight = Scale(28);
     int y = padding;
 
-    if (hasText_) {
-        for (auto& slot : textSlots_) {
+    if (hasList_) {
+        for (auto& slot : listSlots_) {
             slot.bounds = {padding, y, width - padding, y + rowHeight};
             y += rowHeight;
         }
     }
 
     if (hasImages_) {
-        if (hasText_) {
+        if (hasList_) {
             y += Scale(4);
             divider_ = {0, y, width, y + Scale(1)};
             y = divider_.bottom + Scale(4);
@@ -313,7 +408,7 @@ int Picker::Layout(int width) {
         y += imageHeight;
     }
 
-    if (!hasText_ && !hasImages_) {
+    if (!hasList_ && !hasImages_) {
         emptyRow_ = {padding, y, width - padding, y + rowHeight};
         y += rowHeight;
     }
@@ -337,8 +432,8 @@ void Picker::Paint(HDC dc) const {
     }
 
     SetBkMode(dc, TRANSPARENT);
-    if (hasText_) {
-        PaintTextSlots(dc);
+    if (hasList_) {
+        PaintListSlots(dc);
     }
     if (!IsRectEmpty(&divider_)) {
         if (const HBRUSH brush = CreateSolidBrush(kDivider)) {
@@ -349,18 +444,18 @@ void Picker::Paint(HDC dc) const {
     if (hasImages_) {
         PaintImageSlots(dc);
     }
-    if (!hasText_ && !hasImages_) {
+    if (!hasList_ && !hasImages_) {
         const HGDIOBJ previousFont = SelectPickerFont(dc, textFont_);
         SetTextColor(dc, kPlaceholder);
-        DrawLabel(dc, L"履歴はまだありません", emptyRow_, DT_CENTER);
+        DrawLabel(dc, filesOnly_ ? L"ファイルの履歴はまだありません" : L"履歴はまだありません", emptyRow_, DT_CENTER);
         SelectObject(dc, previousFont);
     }
 }
 
-void Picker::PaintTextSlots(HDC dc) const {
+void Picker::PaintListSlots(HDC dc) const {
     const HGDIOBJ previousFont = SelectPickerFont(dc, textFont_);
     for (int index = 0; index < kSlotCount; ++index) {
-        const auto& slot = textSlots_[index];
+        const auto& slot = listSlots_[index];
         Highlight(dc, slot);
         SetTextColor(dc, slot.itemIndex >= 0 ? kForeground : kPlaceholder);
 
@@ -419,7 +514,7 @@ void Picker::Highlight(HDC dc, const Slot& slot) const {
 }
 
 int Picker::ItemAt(POINT point) const {
-    for (const auto* slots : {&textSlots_, &imageSlots_}) {
+    for (const auto* slots : {&listSlots_, &imageSlots_}) {
         for (const auto& slot : *slots) {
             if (slot.itemIndex >= 0 && PtInRect(&slot.bounds, point)) {
                 return slot.itemIndex;
@@ -460,6 +555,23 @@ LRESULT CALLBACK Picker::WindowProc(HWND window, UINT message, WPARAM wParam, LP
     }
 
     switch (message) {
+    case kAnchorReady:
+        picker->AnchorReady(wParam);
+        return 0;
+    case WM_TIMER:
+        if (wParam == kAnchorFallbackTimer) {
+            KillTimer(window, kAnchorFallbackTimer);
+            if (picker->anchorQuery_ && !IsWindowVisible(window)) {
+                const auto& query = *picker->anchorQuery_;
+                if (query.finished.load(std::memory_order_acquire)) {
+                    picker->AnchorReady(query.generation);
+                } else {
+                    picker->Present(std::nullopt);
+                }
+            }
+            return 0;
+        }
+        break;
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;
     case WM_MOUSEMOVE:

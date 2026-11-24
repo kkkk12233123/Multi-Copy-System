@@ -11,6 +11,8 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <string_view>
+#include <type_traits>
 #include <vector>
 
 #ifdef _MSC_VER
@@ -21,6 +23,7 @@ namespace mcs {
 namespace {
 
 constexpr wchar_t kTitle[] = L"Multi-Copy-System 設定";
+constexpr wchar_t kSurfaceClass[] = L"MultiCopySystem.SettingsSurface";
 constexpr int kClientWidth = 528;
 constexpr int kClientHeight = 390;
 constexpr int kEditText = 200;
@@ -36,17 +39,26 @@ constexpr int kHotkeyEnabled = 520;
 constexpr int kHotkey = 530;
 constexpr UINT_PTR kWaitForResident = 1;
 constexpr int kWaitAttempts = 20;
+constexpr auto kShortcutCount = Settings{}.shortcuts.size();
+constexpr std::array kHistoryKinds{L"テキスト", L"画像", L"ファイル"};
 
-enum class Page : int { Always, Slots, History, Preferences };
+enum class Page { Slots, History, Preferences };
 
 struct ControlLayout {
     HWND window;
-    Page page;
     int x;
     int y;
     int width;
     int height;
 };
+
+struct LegacyHistorySnapshot {
+    UINT count;
+    HistoryRow rows[10];
+};
+
+static_assert(offsetof(LegacyHistorySnapshot, rows) == offsetof(HistorySnapshot, rows));
+static_assert(sizeof(LegacyHistorySnapshot) <= sizeof(HistorySnapshot));
 
 struct TextDialog {
     HFONT font;
@@ -77,9 +89,86 @@ HWND AddControl(HWND parent, LPCWSTR windowClass, LPCWSTR text, DWORD style,
                            parent, id ? ToControlId(id) : nullptr, instance, nullptr);
 }
 
-void Place(HWND window, UINT dpi, int x, int y, int width, int height) {
+void Place(HWND window, UINT dpi, int x, int y, int width, int height, bool repaint = true) {
     MoveWindow(window, Scale(x, dpi), Scale(y, dpi), Scale(width, dpi),
-               Scale(height, dpi), TRUE);
+               Scale(height, dpi), repaint);
+}
+
+void PaintSurfaceFrame(HWND window, HDC dc) {
+    wchar_t title[160]{};
+    const int titleLength = GetWindowTextW(window, title, static_cast<int>(std::size(title)));
+    if (!titleLength) {
+        return;
+    }
+
+    const UINT dpi = GetDpiForWindow(window);
+    RECT bounds{};
+    GetClientRect(window, &bounds);
+    const auto oldPen = SelectObject(dc, GetStockObject(DC_PEN));
+    const auto oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    SetDCPenColor(dc, GetSysColor(COLOR_3DSHADOW));
+    const int corner = Scale(4, dpi);
+    RoundRect(dc, bounds.left, bounds.top + Scale(8, dpi), bounds.right, bounds.bottom,
+              corner, corner);
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+
+    const auto font = reinterpret_cast<HFONT>(GetWindowLongPtrW(window, 0));
+    const auto oldFont = SelectObject(dc, font ? font : GetStockObject(DEFAULT_GUI_FONT));
+    constexpr UINT labelFlags = DT_SINGLELINE | DT_NOPREFIX;
+    RECT label{Scale(9, dpi), 0, bounds.right - Scale(9, dpi), 0};
+    DrawTextW(dc, title, titleLength, &label, labelFlags | DT_CALCRECT);
+    RECT backing = label;
+    InflateRect(&backing, Scale(3, dpi), 0);
+    FillRect(dc, &backing, GetSysColorBrush(COLOR_WINDOW));
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+    DrawTextW(dc, title, titleLength, &label, labelFlags);
+    SelectObject(dc, oldFont);
+}
+
+LRESULT CALLBACK SurfaceProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+    case WM_COMMAND:
+        return SendMessageW(GetAncestor(window, GA_ROOT), message, wParam, lParam);
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN: {
+        const auto dc = reinterpret_cast<HDC>(wParam);
+        SetBkColor(dc, GetSysColor(COLOR_WINDOW));
+        SetTextColor(dc, GetSysColor(IsWindowEnabled(reinterpret_cast<HWND>(lParam))
+                                    ? COLOR_WINDOWTEXT : COLOR_GRAYTEXT));
+        return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+    }
+    case WM_SETFONT:
+        SetWindowLongPtrW(window, 0, static_cast<LONG_PTR>(wParam));
+        if (lParam) InvalidateRect(window, nullptr, TRUE);
+        return 0;
+    case WM_GETFONT:
+        return GetWindowLongPtrW(window, 0);
+    case WM_SETTEXT: {
+        const LRESULT result = DefWindowProcW(window, message, wParam, lParam);
+        InvalidateRect(window, nullptr, TRUE);
+        return result;
+    }
+    case WM_PAINT: {
+        PAINTSTRUCT paint{};
+        if (const HDC dc = BeginPaint(window, &paint)) {
+            PaintSurfaceFrame(window, dc);
+            EndPaint(window, &paint);
+        }
+        return 0;
+    }
+    case WM_PRINTCLIENT: {
+        const auto dc = reinterpret_cast<HDC>(wParam);
+        RECT bounds{};
+        GetClientRect(window, &bounds);
+        FillRect(dc, &bounds, GetSysColorBrush(COLOR_WINDOW));
+        PaintSurfaceFrame(window, dc);
+        return 0;
+    }
+    default:
+        return DefWindowProcW(window, message, wParam, lParam);
+    }
 }
 
 void Error(HWND parent, LPCWSTR message) {
@@ -258,6 +347,18 @@ public:
             return false;
         }
 
+        WNDCLASSW surface{};
+        surface.style = CS_HREDRAW | CS_VREDRAW;
+        surface.lpfnWndProc = SurfaceProc;
+        surface.cbWndExtra = sizeof(LONG_PTR);
+        surface.hInstance = instance_;
+        surface.hCursor = definition.hCursor;
+        surface.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
+        surface.lpszClassName = kSurfaceClass;
+        if (!RegisterClassW(&surface)) {
+            return false;
+        }
+
         constexpr DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
                               | WS_CLIPCHILDREN;
         window_ = CreateWindowExW(WS_EX_CONTROLPARENT, kSettingsWindowClass, kTitle, style,
@@ -269,7 +370,9 @@ public:
         ResizeForDpi(GetDpiForWindow(window_), nullptr);
         ShowWindow(window_, showCommand);
         UpdateWindow(window_);
-        SetFocus(tab_);
+        if (GetActiveWindow() == window_) {
+            SetFocus(tab_);
+        }
         return true;
     }
 
@@ -350,28 +453,32 @@ private:
         return DefWindowProcW(window_, message, wParam, lParam);
     }
 
-    HWND Make(Page page, LPCWSTR windowClass, LPCWSTR caption, DWORD style, int id,
+    HWND PageWindow(Page page) const {
+        return pages_[static_cast<std::size_t>(page)];
+    }
+
+    HWND Make(HWND parent, LPCWSTR windowClass, LPCWSTR caption, DWORD style, int id,
               int x, int y, int width, int height, DWORD exStyle = 0) {
-        const HWND control = AddControl(window_, windowClass, caption, style, exStyle, id);
-        controls_.push_back({control, page, x, y, width, height});
+        const HWND control = AddControl(parent, windowClass, caption, style | WS_VISIBLE, exStyle, id);
+        controls_.push_back({control, x, y, width, height});
         return control;
     }
 
-    HWND Button(Page page, LPCWSTR caption, int id, int x, int y, int width) {
-        return Make(page, L"BUTTON", caption, BS_PUSHBUTTON | WS_TABSTOP, id, x, y, width, 26);
+    HWND Button(HWND parent, LPCWSTR caption, int id, int x, int y, int width) {
+        return Make(parent, L"BUTTON", caption, BS_PUSHBUTTON | WS_TABSTOP, id, x, y, width, 26);
     }
 
-    HWND Label(Page page, LPCWSTR caption, int x, int y, int width, DWORD flags = 0) {
-        return Make(page, L"STATIC", caption, SS_LEFT | SS_NOPREFIX | flags, 0,
+    HWND Label(HWND parent, LPCWSTR caption, int x, int y, int width, DWORD flags = 0) {
+        return Make(parent, L"STATIC", caption, SS_LEFT | SS_NOPREFIX | flags, 0,
                     x, y, width, 22);
     }
 
-    HWND Check(Page page, LPCWSTR caption, int id, int x, int y, int width) {
-        return Make(page, L"BUTTON", caption, BS_AUTOCHECKBOX | WS_TABSTOP, id, x, y, width, 22);
+    HWND Check(HWND parent, LPCWSTR caption, int id, int x, int y, int width) {
+        return Make(parent, L"BUTTON", caption, BS_AUTOCHECKBOX | WS_TABSTOP, id, x, y, width, 22);
     }
 
     bool Initialize() {
-        tab_ = Make(Page::Always, WC_TABCONTROLW, L"", WS_TABSTOP, 100,
+        tab_ = Make(window_, WC_TABCONTROLW, L"", WS_TABSTOP, 100,
                     10, 10, 508, 370);
         if (!tab_) {
             return false;
@@ -389,6 +496,13 @@ private:
             }
         }
 
+        for (auto& page : pages_) {
+            page = AddControl(window_, kSurfaceClass, L"", WS_CLIPCHILDREN, WS_EX_CONTROLPARENT, 0);
+            if (!page) {
+                return false;
+            }
+        }
+
         CreateSlots();
         CreateHistory();
         CreatePreferences();
@@ -397,12 +511,6 @@ private:
                 return false;
             }
         }
-        constexpr UINT keepBounds = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
-        for (const HWND group : {slotGroup_[0], slotGroup_[1], slotGroup_[2], shortcutGroup_}) {
-            SetWindowPos(group, HWND_BOTTOM, 0, 0, 0, 0, keepBounds);
-        }
-        SetWindowPos(tab_, HWND_BOTTOM, 0, 0, 0, 0, keepBounds);
-
         SendMessageW(previewLimit_, EM_SETLIMITTEXT, 3, 0);
         SendMessageW(position_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"入力位置の近く"));
         SendMessageW(position_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"画面右下"));
@@ -412,55 +520,59 @@ private:
     }
 
     void CreateSlots() {
+        const HWND page = PageWindow(Page::Slots);
         for (int index = 0; index < 3; ++index) {
-            const int y = 50 + index * 104;
+            const int y = 14 + index * 104;
             const int firstId = kSlotFirst + index * 3;
-            slotGroup_[index] = Make(Page::Slots, L"BUTTON", L"", BS_GROUPBOX, 0,
-                                      22, y, 484, 92);
-            slotLabel_[index] = Label(Page::Slots, L"", 34, y + 21, 460, SS_ENDELLIPSIS);
-            Button(Page::Slots, L"テキスト入力…", firstId, 34, y + 51, 132);
-            Button(Page::Slots, L"クリップボードから登録", firstId + 1, 176, y + 51, 180);
-            slotDelete_[index] = Button(Page::Slots, L"削除", firstId + 2, 366, y + 51, 78);
+            const HWND group = Make(page, kSurfaceClass, L"", WS_CLIPCHILDREN, 0,
+                                    8, y, 484, 92, WS_EX_CONTROLPARENT);
+            slotGroup_[index] = group;
+            slotLabel_[index] = Label(group, L"", 12, 21, 460, SS_ENDELLIPSIS);
+            Button(group, L"テキスト入力…", firstId, 12, 51, 132);
+            Button(group, L"クリップボードから登録", firstId + 1, 154, 51, 180);
+            slotDelete_[index] = Button(group, L"削除", firstId + 2, 344, 51, 78);
         }
+        Label(page, L"ファイルは永久保存に登録できません。ファイル履歴から貼り付けられます。",
+              8, 319, 484);
     }
 
     void CreateHistory() {
-        historyStatus_ = Label(Page::History, L"", 23, 51, 482);
-        historyList_ = Make(Page::History, L"LISTBOX", L"", WS_TABSTOP | WS_VSCROLL
+        const HWND page = PageWindow(Page::History);
+        historyStatus_ = Label(page, L"", 9, 15, 482);
+        historyList_ = Make(page, L"LISTBOX", L"", WS_TABSTOP | WS_VSCROLL
                             | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT, kHistoryList,
-                            23, 79, 482, 220, WS_EX_CLIENTEDGE);
-        deleteHistory_ = Button(Page::History, L"選択した項目を削除", kDeleteHistory, 23, 311, 180);
-        deleteAllHistory_ = Button(Page::History, L"履歴を全削除…", kDeleteAllHistory, 213, 311, 130);
-        startResident_ = Button(Page::History, L"常駐アプリを起動", kStartResident, 355, 311, 150);
+                            9, 43, 482, 220, WS_EX_CLIENTEDGE);
+        deleteHistory_ = Button(page, L"選択した項目を削除", kDeleteHistory, 9, 275, 180);
+        deleteAllHistory_ = Button(page, L"履歴を全削除…", kDeleteAllHistory, 199, 275, 130);
+        startResident_ = Button(page, L"常駐アプリを起動", kStartResident, 341, 275, 150);
     }
 
     void CreatePreferences() {
-        Label(Page::Preferences, L"候補の表示文字数（1～512）", 25, 51, 235);
-        previewLimit_ = Make(Page::Preferences, L"EDIT", L"", WS_TABSTOP | ES_NUMBER,
-                             kPreviewLimit, 270, 48, 62, 24, WS_EX_CLIENTEDGE);
-        Label(Page::Preferences, L"候補の表示位置", 25, 82, 235);
-        position_ = Make(Page::Preferences, L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST,
-                         0, 270, 78, 213, 130);
-        autoStart_ = Check(Page::Preferences, L"Windows サインイン時に常駐アプリを起動",
-                           0, 25, 109, 465);
-        paused_ = Check(Page::Preferences, L"履歴の記録を一時停止", 0, 25, 137, 465);
+        const HWND page = PageWindow(Page::Preferences);
+        Label(page, L"候補の表示文字数（1～512）", 11, 15, 235);
+        previewLimit_ = Make(page, L"EDIT", L"", WS_TABSTOP | ES_NUMBER,
+                             kPreviewLimit, 256, 12, 62, 24, WS_EX_CLIENTEDGE);
+        Label(page, L"候補の表示位置", 11, 46, 235);
+        position_ = Make(page, L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST,
+                         0, 256, 42, 213, 130);
+        autoStart_ = Check(page, L"Windows サインイン時に常駐アプリを起動", 0, 11, 73, 465);
+        paused_ = Check(page, L"履歴の記録を一時停止", 0, 11, 101, 465);
 
-        shortcutGroup_ = Make(Page::Preferences, L"BUTTON", L"ショートカット", BS_GROUPBOX, 0,
-                              22, 170, 484, 158);
-        constexpr LPCWSTR actions[] = {
-            L"履歴から貼り付け", L"永久保存 1", L"永久保存 2", L"永久保存 3"
+        const HWND shortcuts = Make(page, kSurfaceClass, L"ショートカット", WS_CLIPCHILDREN, 0,
+                                    8, 129, 484, 163, WS_EX_CONTROLPARENT);
+        constexpr std::array<LPCWSTR, kShortcutCount> actions{
+            L"履歴から貼り付け", L"永久保存 1", L"永久保存 2", L"永久保存 3", L"ファイル履歴から貼り付け"
         };
-        for (int index = 0; index < 4; ++index) {
-            const int y = 195 + index * 29;
-            Label(Page::Preferences, actions[index], 34, y + 3, 172);
-            hotkeyControl_[index] = Make(Page::Preferences, HOTKEY_CLASSW, L"", WS_TABSTOP,
-                                         kHotkey + index, 211, y, 181, 24, WS_EX_CLIENTEDGE);
-            hotkeyEnabled_[index] = Check(Page::Preferences, L"有効", kHotkeyEnabled + index,
-                                          407, y, 81);
+        for (int index = 0; index < static_cast<int>(actions.size()); ++index) {
+            const int y = 23 + index * 27;
+            Label(shortcuts, actions[index], 12, y + 3, 172);
+            hotkeyControl_[index] = Make(shortcuts, HOTKEY_CLASSW, L"", WS_TABSTOP,
+                                         kHotkey + index, 189, y, 181, 24, WS_EX_CLIENTEDGE);
+            hotkeyEnabled_[index] = Check(shortcuts, L"有効", kHotkeyEnabled + index, 385, y, 81);
         }
-        Button(Page::Preferences, L"保存データをすべて消去…", kClearData, 23, 339, 208);
-        preferenceStatus_ = Label(Page::Preferences, L"", 237, 345, 144);
-        Button(Page::Preferences, L"設定を保存", kSavePreferences, 385, 339, 120);
+        Button(page, L"保存データをすべて消去…", kClearData, 9, 303, 208);
+        preferenceStatus_ = Label(page, L"", 223, 309, 144);
+        Button(page, L"設定を保存", kSavePreferences, 371, 303, 120);
     }
 
     void ResizeForDpi(UINT dpi, const RECT* suggested) {
@@ -474,8 +586,16 @@ private:
         }
         font_ = newFont ? newFont : reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
         for (const auto& control : controls_) {
-            SendMessageW(control.window, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
-            Place(control.window, dpi, control.x, control.y, control.width, control.height);
+            SendMessageW(control.window, WM_SETFONT, reinterpret_cast<WPARAM>(font_), FALSE);
+            Place(control.window, dpi, control.x, control.y, control.width, control.height, false);
+        }
+        RECT pageBounds{};
+        GetClientRect(tab_, &pageBounds);
+        TabCtrl_AdjustRect(tab_, FALSE, &pageBounds);
+        MapWindowPoints(tab_, window_, reinterpret_cast<POINT*>(&pageBounds), 2);
+        for (const HWND page : pages_) {
+            MoveWindow(page, pageBounds.left, pageBounds.top, pageBounds.right - pageBounds.left,
+                       pageBounds.bottom - pageBounds.top, FALSE);
         }
         if (ownedFont_) {
             DeleteObject(ownedFont_);
@@ -489,22 +609,34 @@ private:
                      suggested ? suggested->top : 0, rect.right - rect.left,
                      rect.bottom - rect.top,
                      SWP_NOZORDER | SWP_NOACTIVATE | (suggested ? 0 : SWP_NOMOVE));
+        RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     }
 
     void ShowPage() {
-        page_ = static_cast<Page>(TabCtrl_GetCurSel(tab_) + static_cast<int>(Page::Slots));
-        for (const auto& control : controls_) {
-            const bool visible = control.page == Page::Always || control.page == page_;
-            SetWindowPos(control.window, nullptr, 0, 0, 0, 0,
-                         SWP_NOZORDER | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE |
-                         (visible ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
+        const int selection = TabCtrl_GetCurSel(tab_);
+        if (selection < 0 || selection >= static_cast<int>(pages_.size())) {
+            return;
+        }
+        const Page next = static_cast<Page>(selection);
+        if (next != page_ && IsChild(PageWindow(page_), GetFocus())) {
+            SetFocus(tab_);
+        }
+        page_ = next;
+        const HWND active = PageWindow(page_);
+        for (const HWND page : pages_) {
+            if (page != active) {
+                ShowWindow(page, SW_HIDE);
+            }
         }
         if (page_ == Page::Slots) {
             RefreshSlots();
         } else if (page_ == Page::History) {
             RequestHistory();
         }
-        RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+        SetWindowPos(active, HWND_TOP, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        RedrawWindow(window_, nullptr, nullptr,
+                     RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
     }
 
     void ProcessCommand(int id, int code) {
@@ -519,7 +651,7 @@ private:
             SlotAction((id - kSlotFirst) / 3, (id - kSlotFirst) % 3);
             return;
         }
-        if (id >= kHotkeyEnabled && id < kHotkeyEnabled + 4) {
+        if (id >= kHotkeyEnabled && id < kHotkeyEnabled + static_cast<int>(kShortcutCount)) {
             SetHotkeyEnabled(id - kHotkeyEnabled);
             return;
         }
@@ -599,6 +731,8 @@ private:
                 Error(window_, L"クリップボードを使用中です。もう一度お試しください。");
             } else if (!result.clip) {
                 Error(window_, L"登録できるテキストまたは画像がありません。");
+            } else if (result.clip->kind == ClipKind::Files) {
+                Error(window_, L"ファイルは永久保存に登録できません。ファイル履歴から貼り付けられます。");
             } else if (!LoadSlot(index) || Confirm(window_, L"この保存枠を上書きしますか？")) {
                 StoreSlot(index, result.clip.get());
             }
@@ -647,7 +781,7 @@ private:
 
     bool ReadPreferences(Settings& settings) const {
         BOOL isNumber = FALSE;
-        const UINT limit = GetDlgItemInt(window_, kPreviewLimit, &isNumber, FALSE);
+        const UINT limit = GetDlgItemInt(PageWindow(Page::Preferences), kPreviewLimit, &isNumber, FALSE);
         if (!isNumber || limit < 1 || limit > 512) {
             Error(window_, L"表示文字数は1～512の整数で入力してください。");
             SetFocus(previewLimit_);
@@ -668,7 +802,7 @@ private:
                 SetFocus(hotkeyControl_[index]);
                 return false;
             }
-            if (index == 0 && shortcut.key == VK_ESCAPE) {
+            if ((index == 0 || index == kFileShortcutIndex) && shortcut.key == VK_ESCAPE) {
                 Error(window_, L"Esc は候補表示の取り消しに使われています。");
                 SetFocus(hotkeyControl_[index]);
                 return false;
@@ -759,42 +893,70 @@ private:
 
     LRESULT OnHistorySnapshot(HWND sender, const COPYDATASTRUCT* payload) {
         if (!sender || sender != FindResident() || !payload || payload->dwData != kHistoryPayload
-            || payload->cbData != sizeof(HistorySnapshot) || !payload->lpData) {
+            || !payload->lpData) {
             return FALSE;
         }
         HistorySnapshot received{};
-        std::memcpy(&received, payload->lpData, sizeof(received));
-        if (received.count > std::size(received.rows)) {
+        const bool legacy = payload->cbData == sizeof(LegacyHistorySnapshot);
+        if (!legacy && payload->cbData != sizeof(received)) {
             return FALSE;
         }
-        const auto selected = SendMessageW(historyList_, LB_GETCURSEL, 0, 0);
-        const UINT selectedId = selected >= 0 && static_cast<UINT>(selected) < snapshot_.count
-                              ? snapshot_.rows[selected].id : 0;
-        snapshot_ = received;
-        SendMessageW(historyList_, LB_RESETCONTENT, 0, 0);
-        int newSelection = -1;
-        for (UINT index = 0; index < snapshot_.count; ++index) {
-            auto& row = snapshot_.rows[index];
+        const auto capacity = legacy ? std::extent_v<decltype(LegacyHistorySnapshot::rows)>
+                                     : std::size(received.rows);
+        std::memcpy(&received, payload->lpData, payload->cbData);
+        if (received.count > capacity) {
+            return FALSE;
+        }
+        for (UINT index = 0; index < received.count; ++index) {
+            auto& row = received.rows[index];
+            if (!row.id || row.kind >= (legacy ? 2 : kHistoryKinds.size())) {
+                return FALSE;
+            }
             row.label[std::size(row.label) - 1] = L'\0';
-            const auto prefix = row.kind == 1 ? L"" : L"［テキスト］ ";
-            const std::wstring label = std::wstring(prefix) + row.label;
-            SendMessageW(historyList_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+        }
+
+        const UINT selectedId = SelectedHistoryId();
+        snapshot_ = received;
+        SendMessageW(historyList_, WM_SETREDRAW, FALSE, 0);
+        SendMessageW(historyList_, LB_RESETCONTENT, 0, 0);
+        for (UINT index = 0; index < snapshot_.count; ++index) {
+            const auto& row = snapshot_.rows[index];
+            std::wstring_view detail(row.label);
+            constexpr std::wstring_view legacyImagePrefix = L"画像 ";
+            if (legacy && row.kind == 1 && detail.starts_with(legacyImagePrefix)) {
+                detail.remove_prefix(legacyImagePrefix.size());
+            }
+            std::wstring label = std::wstring(L"［") + kHistoryKinds[row.kind] + L"］ ";
+            label += detail;
+            const LRESULT position = SendMessageW(historyList_, LB_ADDSTRING, 0,
+                                                  reinterpret_cast<LPARAM>(label.c_str()));
+            if (position < 0) {
+                continue;
+            }
+            SendMessageW(historyList_, LB_SETITEMDATA, static_cast<WPARAM>(position), row.id);
             if (row.id == selectedId) {
-                newSelection = static_cast<int>(index);
+                SendMessageW(historyList_, LB_SETCURSEL, static_cast<WPARAM>(position), 0);
             }
         }
-        if (newSelection >= 0) {
-            SendMessageW(historyList_, LB_SETCURSEL, newSelection, 0);
-        }
+        SendMessageW(historyList_, WM_SETREDRAW, TRUE, 0);
+        RedrawWindow(historyList_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME);
         UpdateHistoryControls();
         return TRUE;
     }
 
+    UINT SelectedHistoryId() const {
+        const LRESULT selected = SendMessageW(historyList_, LB_GETCURSEL, 0, 0);
+        if (selected == LB_ERR) {
+            return 0;
+        }
+        const LRESULT id = SendMessageW(historyList_, LB_GETITEMDATA, static_cast<WPARAM>(selected), 0);
+        return id == LB_ERR ? 0 : static_cast<UINT>(id);
+    }
+
     void UpdateHistoryControls() const {
         const bool running = FindResident() != nullptr;
-        const auto selected = SendMessageW(historyList_, LB_GETCURSEL, 0, 0);
         EnableWindow(startResident_, !running && waitAttempts_ == 0);
-        EnableWindow(deleteHistory_, running && selected >= 0);
+        EnableWindow(deleteHistory_, running && SelectedHistoryId() != 0);
         EnableWindow(deleteAllHistory_, running && snapshot_.count > 0);
         if (waitAttempts_) {
             SetWindowTextW(historyStatus_, L"常駐アプリを起動しています…");
@@ -803,17 +965,20 @@ private:
         } else if (!snapshot_.count) {
             SetWindowTextW(historyStatus_, L"履歴は空です。");
         } else {
-            const auto text = L"履歴 " + std::to_wstring(snapshot_.count) + L" 件";
+            std::array<UINT, kHistoryKinds.size()> counts{};
+            for (UINT index = 0; index < snapshot_.count; ++index) {
+                ++counts[snapshot_.rows[index].kind];
+            }
+            const auto text = L"テキスト " + std::to_wstring(counts[0]) + L" 件　画像 "
+                            + std::to_wstring(counts[1]) + L" 件　ファイル "
+                            + std::to_wstring(counts[2]) + L" 件";
             SetWindowTextW(historyStatus_, text.c_str());
         }
     }
 
     void DeleteHistory() {
-        const auto selection = SendMessageW(historyList_, LB_GETCURSEL, 0, 0);
-        if (selection < 0 || static_cast<UINT>(selection) >= snapshot_.count) {
-            return;
-        }
-        if (!NotifyResident(kDeleteHistoryItem, snapshot_.rows[selection].id)) {
+        if (const UINT selectedId = SelectedHistoryId(); selectedId &&
+            !NotifyResident(kDeleteHistoryItem, selectedId)) {
             RequestHistory();
         }
     }
@@ -844,6 +1009,7 @@ private:
     HFONT font_ = nullptr;
     HFONT ownedFont_ = nullptr;
     Page page_ = Page::Slots;
+    std::array<HWND, 3> pages_{};
     std::vector<ControlLayout> controls_;
     Settings settings_{};
     HistorySnapshot snapshot_{};
@@ -861,9 +1027,8 @@ private:
     HWND autoStart_ = nullptr;
     HWND paused_ = nullptr;
     HWND preferenceStatus_ = nullptr;
-    HWND shortcutGroup_ = nullptr;
-    std::array<HWND, 4> hotkeyControl_{};
-    std::array<HWND, 4> hotkeyEnabled_{};
+    std::array<HWND, kShortcutCount> hotkeyControl_{};
+    std::array<HWND, kShortcutCount> hotkeyEnabled_{};
 };
 
 }  // namespace

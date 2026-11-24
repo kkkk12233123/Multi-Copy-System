@@ -13,10 +13,13 @@ constexpr wchar_t kSettingsName[] = L"settings.bin";
 constexpr std::array<const wchar_t*, 3> kSlotNames{L"slot1.bin", L"slot2.bin", L"slot3.bin"};
 constexpr std::uint32_t kSettingsMagic = 0x5343534d; // MCSS
 constexpr std::uint32_t kSlotMagic = 0x4c53434d; // MCSL
-constexpr std::uint32_t kVersion = 1;
+constexpr std::uint32_t kLegacySettingsVersion = 1;
+constexpr std::uint32_t kSettingsVersion = 2;
+constexpr std::uint32_t kSlotVersion = 1;
+constexpr std::size_t kLegacySettingsWords = 4 + 2 * kFileShortcutIndex;
 
 enum class StoredFormat : std::uint32_t { Text = 1, Dib, DibV5, Png };
-using SettingsRecord = std::array<std::uint32_t, 12>;
+using SettingsRecord = std::array<std::uint32_t, kLegacySettingsWords + 2>;
 using SlotHeader = std::array<std::uint32_t, 4>;
 
 class FileHandle {
@@ -113,6 +116,10 @@ bool RemoveFile(const std::filesystem::path& path) {
     return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
 }
 
+bool SameShortcut(const Shortcut& first, const Shortcut& second) {
+    return first.key == second.key && first.modifiers == second.modifiers;
+}
+
 bool IsValidSettings(const Settings& settings) {
     if (settings.previewLimit < 1 || settings.previewLimit > 512) {
         return false;
@@ -130,12 +137,11 @@ bool IsValidSettings(const Settings& settings) {
         if (shortcut.modifiers == MOD_CONTROL && (shortcut.key == 'C' || shortcut.key == 'X' || shortcut.key == 'V')) {
             return false;
         }
-        if (index == 0 && shortcut.key == VK_ESCAPE) {
+        if ((index == 0 || index == kFileShortcutIndex) && shortcut.key == VK_ESCAPE) {
             return false;
         }
         for (std::size_t earlier = 0; earlier < index; ++earlier) {
-            const auto other = settings.shortcuts[earlier];
-            if (shortcut.key == other.key && shortcut.modifiers == other.modifiers) {
+            if (SameShortcut(shortcut, settings.shortcuts[earlier])) {
                 return false;
             }
         }
@@ -201,9 +207,16 @@ Settings LoadSettings() {
         return {};
     }
     const auto file = OpenForReading(dir / kSettingsName);
+    if (!file) {
+        return {};
+    }
     SettingsRecord record{};
-    if (!file || !HasSize(file, sizeof(record)) || !ReadBytes(file, std::as_writable_bytes(std::span{record}))
-        || record[0] != kSettingsMagic || record[1] != kVersion || record[2] < 1 || record[2] > 512
+    const bool legacy = HasSize(file, kLegacySettingsWords * sizeof(record[0]));
+    if ((!legacy && !HasSize(file, sizeof(record))) ||
+        !ReadBytes(file, std::as_writable_bytes(std::span{record}.first(
+            legacy ? kLegacySettingsWords : record.size())))
+        || record[0] != kSettingsMagic || record[1] != (legacy ? kLegacySettingsVersion : kSettingsVersion)
+        || record[2] < 1 || record[2] > 512
         || record[3] > 3) {
         return {};
     }
@@ -212,8 +225,18 @@ Settings LoadSettings() {
     settings.previewLimit = static_cast<int>(record[2]);
     settings.bottomRight = (record[3] & 1) != 0;
     settings.paused = (record[3] & 2) != 0;
-    for (std::size_t index = 0; index < settings.shortcuts.size(); ++index) {
+    const std::size_t shortcutCount = legacy ? kFileShortcutIndex : settings.shortcuts.size();
+    for (std::size_t index = 0; index < shortcutCount; ++index) {
         settings.shortcuts[index] = {record[4 + 2 * index], record[5 + 2 * index]};
+    }
+    if (legacy) {
+        auto& fileShortcut = settings.shortcuts[kFileShortcutIndex];
+        for (std::size_t index = 0; index < shortcutCount; ++index) {
+            if (SameShortcut(fileShortcut, settings.shortcuts[index])) {
+                fileShortcut = {};
+                break;
+            }
+        }
     }
     return IsValidSettings(settings) ? settings : Settings{};
 }
@@ -224,7 +247,7 @@ bool SaveSettings(const Settings& settings) {
         return false;
     }
     const std::uint32_t flags = (settings.bottomRight ? 1u : 0u) | (settings.paused ? 2u : 0u);
-    SettingsRecord record{kSettingsMagic, kVersion, static_cast<std::uint32_t>(settings.previewLimit), flags};
+    SettingsRecord record{kSettingsMagic, kSettingsVersion, static_cast<std::uint32_t>(settings.previewLimit), flags};
     for (std::size_t index = 0; index < settings.shortcuts.size(); ++index) {
         record[4 + 2 * index] = settings.shortcuts[index].modifiers;
         record[5 + 2 * index] = settings.shortcuts[index].key;
@@ -240,7 +263,7 @@ std::shared_ptr<const ClipData> LoadSlot(int index) {
     const auto file = OpenForReading(path);
     SlotHeader header{};
     if (!file || !ReadBytes(file, std::as_writable_bytes(std::span{header}))
-        || header[0] != kSlotMagic || header[1] != kVersion
+        || header[0] != kSlotMagic || header[1] != kSlotVersion
         || !header[3] || header[3] > kMaxClipBytes || !HasSize(file, sizeof(header) + header[3])) {
         return {};
     }
@@ -259,11 +282,11 @@ bool SaveSlot(int index, const ClipData* clip) {
     if (!clip) {
         return RemoveFile(path);
     }
-    if (!IsValidClip(*clip)) {
+    if (clip->kind == ClipKind::Files || !IsValidClip(*clip)) {
         return false;
     }
 
-    const SlotHeader header{kSlotMagic, kVersion, static_cast<std::uint32_t>(FormatFor(*clip)),
+    const SlotHeader header{kSlotMagic, kSlotVersion, static_cast<std::uint32_t>(FormatFor(*clip)),
         static_cast<std::uint32_t>(ClipBytes(*clip))};
     const auto contents = clip->kind == ClipKind::Text ? std::as_bytes(std::span{clip->text})
         : std::as_bytes(std::span{clip->image});

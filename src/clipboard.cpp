@@ -1,9 +1,12 @@
 #include "clipboard.h"
 
+#include <shlobj.h>
+
 #include <algorithm>
 #include <array>
 #include <cstring>
 #include <cwchar>
+#include <optional>
 #include <span>
 #include <utility>
 
@@ -40,6 +43,180 @@ private:
     HGLOBAL memory_;
     void* data_;
 };
+
+class ClipboardMemory {
+public:
+    explicit ClipboardMemory(std::size_t bytes) : memory_(GlobalAlloc(GMEM_MOVEABLE, bytes)) {}
+    ~ClipboardMemory() {
+        if (memory_) {
+            GlobalFree(memory_);
+        }
+    }
+    ClipboardMemory(const ClipboardMemory&) = delete;
+    ClipboardMemory& operator=(const ClipboardMemory&) = delete;
+    HGLOBAL Get() const { return memory_; }
+
+    bool Publish(UINT format) {
+        if (!SetClipboardData(format, memory_)) {
+            return false;
+        }
+        memory_ = nullptr;
+        return true;
+    }
+
+private:
+    HGLOBAL memory_;
+};
+
+bool IsPathSeparator(wchar_t character) {
+    return character == L'\\' || character == L'/';
+}
+
+bool IsAbsoluteFilePath(std::wstring_view path) {
+    if (path.size() < 3 || path.find(L'\0') != std::wstring_view::npos) {
+        return false;
+    }
+    const bool drive = (path.front() >= L'A' && path.front() <= L'Z')
+        || (path.front() >= L'a' && path.front() <= L'z');
+    return (drive && path[1] == L':' && IsPathSeparator(path[2])) ||
+        (IsPathSeparator(path[0]) && IsPathSeparator(path[1]) && !IsPathSeparator(path[2]));
+}
+
+struct DropSizes {
+    std::size_t bufferBytes = sizeof(DROPFILES) + sizeof(wchar_t);
+    std::size_t retainedBytes = bufferBytes;
+
+    bool AddPath(std::size_t characters) {
+        if (characters >= (kMaxClipBytes - retainedBytes) / sizeof(wchar_t)) {
+            return false;
+        }
+        const auto bytes = (characters + 1) * sizeof(wchar_t);
+        if (sizeof(std::wstring) > kMaxClipBytes - retainedBytes - bytes) {
+            return false;
+        }
+        bufferBytes += bytes;
+        retainedBytes += bytes + sizeof(std::wstring);
+        return true;
+    }
+};
+
+std::optional<DropSizes> FileDropSizes(const ClipData& clip) {
+    if (clip.files.empty()) {
+        return {};
+    }
+    DropSizes sizes;
+    for (const auto& path : clip.files) {
+        if (!IsAbsoluteFilePath(path) || !sizes.AddPath(path.size())) {
+            return {};
+        }
+    }
+    return sizes;
+}
+
+std::wstring WidePath(std::wstring_view path) {
+    return std::wstring(path);
+}
+
+std::wstring WidePath(std::string_view path) {
+    const auto bytes = static_cast<int>(path.size());
+    const int length = MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, path.data(), bytes, nullptr, 0);
+    if (!length) {
+        return {};
+    }
+    std::wstring result(static_cast<std::size_t>(length), L'\0');
+    if (MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, path.data(), bytes, result.data(), length) != length) {
+        return {};
+    }
+    return result;
+}
+
+template <class Char>
+std::shared_ptr<const ClipData> ReadDropNames(std::basic_string_view<Char> names) {
+    auto clip = std::make_shared<ClipData>();
+    clip->kind = ClipKind::Files;
+    DropSizes sizes;
+    while (!names.empty() && names.front() != Char{}) {
+        const auto end = names.find(Char{});
+        if (end == std::basic_string_view<Char>::npos) {
+            return {};
+        }
+        auto path = WidePath(names.substr(0, end));
+        if (!IsAbsoluteFilePath(path) || !sizes.AddPath(path.size())) {
+            return {};
+        }
+        clip->files.push_back(std::move(path));
+        names.remove_prefix(end + 1);
+    }
+    if (names.empty() || clip->files.empty()) {
+        return {};
+    }
+    return clip;
+}
+
+std::shared_ptr<const ClipData> ReadFiles() {
+    if (!IsClipboardFormatAvailable(CF_HDROP)) {
+        return {};
+    }
+    const HGLOBAL memory = GetClipboardData(CF_HDROP);
+    if (!memory) {
+        return {};
+    }
+    const auto length = std::min<std::size_t>(GlobalSize(memory), kMaxClipBytes);
+    const GlobalMemoryView view(memory);
+    if (!view.Data() || length < sizeof(DROPFILES)) {
+        return {};
+    }
+    DROPFILES drop{};
+    std::memcpy(&drop, view.Data(), sizeof(drop));
+    if (drop.pFiles < sizeof(DROPFILES) || drop.pFiles >= length) {
+        return {};
+    }
+    const auto* names = static_cast<const char*>(view.Data()) + drop.pFiles;
+    const auto nameBytes = length - drop.pFiles;
+    if (!drop.fWide) {
+        return ReadDropNames(std::string_view(names, nameBytes));
+    }
+    if (drop.pFiles % alignof(wchar_t) != 0) {
+        return {};
+    }
+    return ReadDropNames(std::wstring_view(reinterpret_cast<const wchar_t*>(names), nameBytes / sizeof(wchar_t)));
+}
+
+bool WriteFiles(HWND window, const ClipData& clip) {
+    const auto sizes = FileDropSizes(clip);
+    static const UINT preferredEffect = RegisterClipboardFormatW(CFSTR_PREFERREDDROPEFFECT);
+    if (!sizes || !preferredEffect) {
+        return false;
+    }
+    ClipboardMemory files(sizes->bufferBytes);
+    ClipboardMemory effect(sizeof(DWORD));
+    if (!files.Get() || !effect.Get()) {
+        return false;
+    }
+    {
+        const GlobalMemoryView fileView(files.Get());
+        const GlobalMemoryView effectView(effect.Get());
+        if (!fileView.Data() || !effectView.Data()) {
+            return false;
+        }
+        DROPFILES drop{};
+        drop.pFiles = sizeof(drop);
+        drop.fWide = TRUE;
+        std::memcpy(fileView.Data(), &drop, sizeof(drop));
+        auto* output = static_cast<char*>(fileView.Data()) + sizeof(drop);
+        for (const auto& path : clip.files) {
+            const auto bytes = (path.size() + 1) * sizeof(wchar_t);
+            std::memcpy(output, path.c_str(), bytes);
+            output += bytes;
+        }
+        std::memset(output, 0, sizeof(wchar_t));
+        constexpr DWORD copy = DROPEFFECT_COPY;
+        std::memcpy(effectView.Data(), &copy, sizeof(copy));
+    }
+
+    const OpenClipboardScope clipboard(window);
+    return clipboard && EmptyClipboard() && effect.Publish(preferredEffect) && files.Publish(CF_HDROP);
+}
 
 std::uint32_t ReadBigEndian32(Bytes data, std::size_t offset) {
     return (std::uint32_t{data[offset]} << 24) | (std::uint32_t{data[offset + 1]} << 16)
@@ -302,6 +479,9 @@ ClipReadResult ReadClipboard(HWND window, bool honorExclusions) {
     if (honorExclusions && IsExcluded()) {
         return {};
     }
+    if (auto clip = ReadFiles()) {
+        return {ClipReadStatus::Found, std::move(clip)};
+    }
     if (auto clip = ReadText()) {
         return {ClipReadStatus::Found, std::move(clip)};
     }
@@ -318,7 +498,13 @@ ClipReadResult ReadClipboard(HWND window, bool honorExclusions) {
 }
 
 bool WriteClipboard(HWND window, const ClipData& clip) {
-    if (!window || !IsValidClip(clip)) {
+    if (!window) {
+        return false;
+    }
+    if (clip.kind == ClipKind::Files) {
+        return WriteFiles(window, clip);
+    }
+    if (!IsValidClip(clip)) {
         return false;
     }
     const UINT format = WriteFormat(clip);
@@ -351,6 +537,10 @@ bool WriteClipboard(HWND window, const ClipData& clip) {
 }
 
 std::size_t ClipBytes(const ClipData& clip) {
+    if (clip.kind == ClipKind::Files) {
+        const auto sizes = FileDropSizes(clip);
+        return sizes ? sizes->retainedBytes : 0;
+    }
     return clip.kind == ClipKind::Text ? clip.text.size() * sizeof(wchar_t) : clip.image.size();
 }
 
@@ -361,6 +551,9 @@ bool IsValidClip(const ClipData& clip) {
     }
     if (clip.kind == ClipKind::Text) {
         return clip.text.find(L'\0') == std::wstring::npos;
+    }
+    if (clip.kind == ClipKind::Files) {
+        return true;
     }
     return clip.kind == ClipKind::Image && ImageSize(clip.image, clip.imageFormat) == bytes;
 }
@@ -394,6 +587,27 @@ std::wstring ClipTextPreview(std::wstring_view text, int characterLimit) {
         preview.push_back(L'\u2026');
     }
     return preview;
+}
+
+std::wstring ClipFilesPreview(const ClipData& clip, int characterLimit) {
+    if (clip.files.empty() || characterLimit <= 0) {
+        return {};
+    }
+    std::wstring_view name = clip.files.front();
+    const auto last = name.find_last_not_of(L"\\/");
+    name = name.substr(0, last == std::wstring_view::npos ? 0 : last + 1);
+    const auto separator = name.find_last_of(L"\\/");
+    if (separator != std::wstring_view::npos) {
+        name.remove_prefix(separator + 1);
+    }
+    if (clip.files.size() == 1) {
+        return ClipTextPreview(name, characterLimit);
+    }
+    const auto suffix = L" 他 " + std::to_wstring(clip.files.size() - 1) + L" 件";
+    if (static_cast<std::size_t>(characterLimit) <= suffix.size()) {
+        return ClipTextPreview(std::to_wstring(clip.files.size()) + L"件", characterLimit);
+    }
+    return ClipTextPreview(name, characterLimit - static_cast<int>(suffix.size())) + suffix;
 }
 
 } // namespace mcs

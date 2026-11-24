@@ -157,13 +157,13 @@ bool InputMonitor::HandleKey(const KBDLLHOOKSTRUCT& key, bool isDown) {
         if (!target || IsSettingsWindow(target)) {
             return false;
         }
-        if (index == 0) {
+        if (index == 0 || index == kFileShortcutIndex) {
             picking_ = true;
             pickerKey_ = vk;
             pickerModifiers_ = modifiers;
             wheelRemainder_ = 0;
             pendingSlot_ = -1;
-            PostMessageW(receiver_, kShowPicker, 0, reinterpret_cast<LPARAM>(target));
+            PostMessageW(receiver_, kShowPicker, index == kFileShortcutIndex, reinterpret_cast<LPARAM>(target));
             PostThreadMessageW(threadId_, kUpdateMouseHook, 0, 0);
         } else {
             if ((savedSlots_.load(std::memory_order_relaxed) & (1u << (index - 1))) == 0) {

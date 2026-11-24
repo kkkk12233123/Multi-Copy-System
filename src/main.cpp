@@ -130,7 +130,7 @@ private:
             CaptureClipboard();
             return 0;
         case kShowPicker:
-            ShowPicker(reinterpret_cast<HWND>(lParam));
+            ShowPicker(reinterpret_cast<HWND>(lParam), wParam != 0);
             return 0;
         case kMovePicker:
             if (!pickerItems_.empty()) {
@@ -236,22 +236,28 @@ private:
         }
     }
 
-    void ShowPicker(HWND target) {
+    void ShowPicker(HWND target, bool filesOnly) {
         if (GetForegroundWindow() != target) return;
 
         pickerItems_.clear();
         pickerTarget_ = target;
         selected_ = 0;
         const auto& entries = history_.Entries();
-        for (const ClipKind kind : {ClipKind::Text, ClipKind::Image}) {
+        const auto latest = std::find_if(entries.begin(), entries.end(), [filesOnly](const HistoryEntry& entry) {
+            return (entry.clip->kind == ClipKind::Files) == filesOnly;
+        });
+        const UINT latestId = latest == entries.end() ? 0 : latest->id;
+        for (const ClipKind kind : {ClipKind::Text, ClipKind::Image, ClipKind::Files}) {
+            if ((kind == ClipKind::Files) != filesOnly) continue;
             int number = 1;
             for (const auto& entry : entries) {
                 if (entry.clip->kind != kind) continue;
-                if (entry.id == entries.front().id) selected_ = static_cast<int>(pickerItems_.size());
+                if (entry.id == latestId) selected_ = static_cast<int>(pickerItems_.size());
                 pickerItems_.push_back({entry.clip, number++});
+                if (number > kPickerItemsPerKind) break;
             }
         }
-        picker_.Show(pickerItems_, selected_, settings_.previewLimit, settings_.bottomRight, target);
+        picker_.Show(pickerItems_, selected_, settings_.previewLimit, settings_.bottomRight, target, filesOnly);
     }
 
     void SelectPicker(int index) {
@@ -333,12 +339,23 @@ private:
 
         HistorySnapshot snapshot{};
         for (const auto& entry : history_.Entries()) {
+            if (snapshot.count == std::size(snapshot.rows)) break;
             auto& row = snapshot.rows[snapshot.count++];
             row.id = entry.id;
-            row.kind = entry.clip->kind == ClipKind::Text ? 0 : 1;
-            const auto label = row.kind == 0
-                ? ClipTextPreview(entry.clip->text, std::min(settings_.previewLimit, 256))
-                : L"画像 (" + std::to_wstring((entry.clip->image.size() + 1023) / 1024) + L" KB)";
+            row.kind = static_cast<UINT>(entry.clip->kind);
+            const int previewLimit = std::min(settings_.previewLimit, 256);
+            std::wstring label;
+            switch (entry.clip->kind) {
+            case ClipKind::Text:
+                label = ClipTextPreview(entry.clip->text, previewLimit);
+                break;
+            case ClipKind::Image:
+                label = std::to_wstring((entry.clip->image.size() + 1023) / 1024) + L" KB";
+                break;
+            case ClipKind::Files:
+                label = ClipFilesPreview(*entry.clip, previewLimit);
+                break;
+            }
             size_t count = std::min(label.size(), std::size(row.label) - 1);
             if (count < label.size() && label[count - 1] >= 0xd800 && label[count - 1] <= 0xdbff) {
                 --count;

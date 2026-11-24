@@ -4,11 +4,11 @@
 
 ## English
 
-Multi-Copy-System is a lightweight Windows clipboard manager. It keeps up to five recent text items, five recent images, and three permanent slots. The keyboard picker and the settings app are included in the same Windows package.
+Multi-Copy-System is a lightweight Windows clipboard manager. It keeps up to ten recent text items, five images, five file selections, and three permanent slots. The keyboard picker and the settings app are included in the same Windows package.
 
 ### Download
 
-1. Open [GitHub Releases](https://github.com/kkkk12233123/Multi-Copy-System/releases) and download `Multi-Copy-System-windows-x64.zip` from **Assets** when a release is available. Use the build instructions below to create the executables from source.
+1. Open [GitHub Releases](https://github.com/kkkk12233123/Multi-Copy-System/releases) and download `Multi-Copy-System-windows-x64.zip` from **Assets**. Use the build instructions below to create the executables from source.
 2. Extract the ZIP to a folder you plan to keep. Both executables are directly inside the extraction folder. Keep them together.
 
    ```text
@@ -28,12 +28,17 @@ Multi-Copy-System is a lightweight Windows clipboard manager. It keeps up to fiv
 
 | Shortcut | Action |
 | --- | --- |
-| `Ctrl+C` / `Ctrl+X` | Copy or cut as usual and add the resulting text or image to its history. |
-| `Ctrl+Shift+V` | Open the picker with the newest item selected. Use the arrow keys, mouse wheel, or pointer, or press `V` again while holding `Ctrl+Shift`. Release the keys to paste. Press `Esc` to cancel. |
+| `Ctrl+C` / `Ctrl+X` | Copy or cut as usual and add the resulting text, image, or file selection to its history. |
+| `Ctrl+Shift+V` | Open the text and image picker near the insertion point, with the newest item selected. Press `V` again while holding `Ctrl+Shift` to move to the next item. |
+| `Ctrl+Shift+F` | Open the picker for up to five recent file selections. Press `F` again while holding `Ctrl+Shift` to move to the next item. Focus the file list in the destination File Explorer folder before using the shortcut. |
 | `Ctrl+1` / `Ctrl+2` / `Ctrl+3` | Paste from the corresponding permanent slot. |
 | `Ctrl+V` | Paste from the Windows clipboard as usual. |
 
-Text appears in a vertical list. Copied images appear underneath as numbered photo icons. Special pastes put the selected item on the Windows clipboard for subsequent `Ctrl+V` presses.
+Both pickers support the arrow keys, mouse wheel, and pointer. Release the keys to paste or press `Esc` to cancel. The text and image picker shows the five most recent text items in a vertical list, with up to five numbered photo icons underneath. The **History** tab shows all ten recent text items. When the app cannot find the insertion point, it places the picker near the focused control or pointer.
+
+A file-history entry stores the paths from one copy or cut operation, including multiple files or folders selected together. Keeping these paths in history uses only a small amount of memory. Pasting into File Explorer creates copies at the destination and uses disk space there. Keep the originals available at their saved paths. Pasting from file history always copies, including entries recorded with `Ctrl+X`.
+
+Special pastes put the selected item on the Windows clipboard for subsequent `Ctrl+V` presses.
 
 ### Settings
 
@@ -41,7 +46,7 @@ Text appears in a vertical list. Copied images appear underneath as numbered pho
 - **History** (`履歴`) – Remove one item or clear all recent items. Recent items are held in memory and cleared when the background app exits.
 - **Settings** (`設定`) – Change the popup position, preview length, shortcuts, and auto-start. You can pause history recording or clear the data stored by the app. The preview limit only affects what the picker shows.
 
-Each clipboard item can be up to 16 MiB. Supported items are plain Unicode text and Windows clipboard images in DIB, DIBV5, or PNG format. Pasting to a Windows app running as administrator requires the same permission level.
+Text and image items can be up to 16 MiB each. For file entries, the limit applies to the stored path list. Text uses Unicode plain text, and images use DIB, DIBV5, or PNG. Pasting to a Windows app running as administrator requires the same permission level.
 
 ### Build from source
 
@@ -65,11 +70,11 @@ To remove the app, turn off sign-in launch, clear its stored data in **Settings*
 
 ## 日本語
 
-Multi-Copy-System は Windows 向けの軽量なクリップボード管理ツールです。テキストと画像の履歴をそれぞれ最大5件、永久保存を3枠まで保持します。履歴の呼び出しと貼り付けはキーボードで操作でき、登録や表示の変更は専用の設定画面で行います。
+Multi-Copy-System は Windows 向けの軽量なクリップボード管理ツールです。テキスト履歴を最大10件、画像とファイル選択の履歴を各5件、永久保存を3枠まで保持します。履歴はキーボードで呼び出せます。永久保存への登録や表示の変更は専用の設定画面から行います。
 
 ### ダウンロード
 
-1. リリース公開後、[GitHub Releases](https://github.com/kkkk12233123/Multi-Copy-System/releases)の **Assets** から `Multi-Copy-System-windows-x64.zip` をダウンロードします。ソースから実行ファイルを作る方法は下記に記載しています。
+1. [GitHub Releases](https://github.com/kkkk12233123/Multi-Copy-System/releases)の **Assets** から `Multi-Copy-System-windows-x64.zip` をダウンロードします。ソースから実行ファイルを作る方法は下記に記載しています。
 2. ZIP を使い続けるフォルダーに展開します。2つのEXEは展開先フォルダーの直下にあります。そのまま同じフォルダーに置いて使います。
 
    ```text
@@ -89,12 +94,17 @@ Multi-Copy-System は Windows 向けの軽量なクリップボード管理ツ�
 
 | キー操作 | 動作 |
 | --- | --- |
-| `Ctrl+C` / `Ctrl+X` | 通常どおりコピーまたは切り取りをし、取得したテキストや画像を履歴に追加します。 |
-| `Ctrl+Shift+V` | 最新の候補を選択した状態で履歴を表示します。矢印キー、ホイール、マウスで選択できます。`Ctrl+Shift` を押したまま `V` を押し直しても移動できます。キーを離すと貼り付け、`Esc` で取り消します。 |
+| `Ctrl+C` / `Ctrl+X` | 通常どおりコピーまたは切り取りをし、テキスト・画像・ファイル選択を履歴に追加します。 |
+| `Ctrl+Shift+V` | テキスト・画像の履歴を、最新の候補を選んだ状態で入力位置の近くに表示します。`Ctrl+Shift` を押したまま `V` を押し直すと、次の候補に移動します。 |
+| `Ctrl+Shift+F` | ファイル履歴を最大5件表示します。`Ctrl+Shift` を押したまま `F` を押し直すと、次の候補に移動します。使う前にエクスプローラーでコピー先を開き、ファイル一覧にフォーカスを置きます。 |
 | `Ctrl+1` / `Ctrl+2` / `Ctrl+3` | 対応する永久保存枠の内容を貼り付けます。 |
 | `Ctrl+V` | 通常どおり Windows のクリップボードから貼り付けます。 |
 
-テキストは縦のリスト、画像は下段の番号付き写真アイコンで表示します。履歴や永久保存から貼り付けた内容は Windows のクリップボードにも入り、次の `Ctrl+V` で使えます。
+どちらの候補画面も矢印キー、ホイール、マウスで選べます。キーを離すと貼り付け、`Esc` で取り消します。テキスト・画像の候補には、最新のテキスト5件を縦に、画像最大5件を番号付きの写真アイコンで下段に表示します。テキスト履歴の10件すべては設定画面の **履歴** タブで確認できます。入力位置を取得できないときは、入力欄やマウスポインターの近くに候補を表示します。
+
+ファイル履歴には、1回のコピーや切り取りで選んだファイル・フォルダーのパスを保存します。複数をまとめて選んだ操作も履歴1件です。履歴の保存で使うメモリはパスの分だけです。エクスプローラーに貼り付けるとコピー先に実ファイルが作られ、その分のディスク容量を使います。元のファイルは保存時の場所からアクセスできる状態にしてください。`Ctrl+X` で記録したファイルも、履歴から貼り付けるとコピーになります。
+
+履歴や永久保存から貼り付けた内容は Windows のクリップボードにも入り、次の `Ctrl+V` で使えます。
 
 ### 設定画面
 
@@ -102,7 +112,7 @@ Multi-Copy-System は Windows 向けの軽量なクリップボード管理ツ�
 - **履歴**。履歴を1件ずつ、またはまとめて削除できます。履歴はメモリに保存し、常駐アプリを終了すると消えます。
 - **設定**。表示位置、文字数上限、ショートカット、自動起動を変更できます。履歴記録の一時停止と、アプリの保存データの全消去も行えます。文字数上限は候補表示に適用され、貼り付け時は全文を使います。
 
-保存できるデータは1件あたり16 MiBまでです。Unicodeのプレーンテキストと、DIB・DIBV5・PNG形式のクリップボード画像に対応します。管理者として実行中のアプリへの貼り付けには、同じ権限が必要です。
+テキストと画像は1件あたり16 MiBまでです。ファイル履歴の上限は保存するパス一覧に適用されます。テキストはUnicodeのプレーンテキスト、画像はDIB・DIBV5・PNGに対応します。管理者として実行中のアプリへの貼り付けには、同じ権限が必要です。
 
 ### ソースからビルド
 
