@@ -19,6 +19,9 @@ Multi-Copy-System is a lightweight Windows clipboard manager. It keeps up to fiv
    ```
 
 3. Run `MultiCopySystem.exe`. It stays in the Windows notification area. Run `MultiCopySettings.exe` or open **Settings** (`設定を開く`) from the tray icon.
+
+   If Microsoft Defender SmartScreen shows **Windows protected your PC**, check that you downloaded the ZIP from this project's GitHub Releases page. Click **More info**, confirm that the app name matches the EXE you opened, and select **Run anyway** if that button appears. If you do not see the SmartScreen prompt, start the app as usual.
+
 4. To start automatically, select **Settings** (`設定`) → **Start at Windows sign-in** (`Windows サインイン時に常駐アプリを起動`) and save. The app runs under your current Windows account.
 
 ### Default keyboard shortcuts
@@ -77,6 +80,9 @@ Multi-Copy-System は Windows 向けの軽量なクリップボード管理ツ�
    ```
 
 3. `MultiCopySystem.exe` を起動すると、通知領域に常駐します。設定を開くには `MultiCopySettings.exe` を実行するか、通知領域のアイコンを右クリックして **設定を開く** を選びます。
+
+   Microsoft Defender SmartScreen の **Windows によって PC が保護されました** が表示された場合は、このプロジェクトの GitHub Releases からZIPを入手したことを確認し、**詳細情報** をクリックします。表示されたアプリ名が開いたEXEと一致し、**実行** ボタンが表示されていれば、**実行** を選びます。この画面が出ない場合は、通常どおり起動できます。
+
 4. 自動起動を使うには、**設定** タブで **Windows サインイン時に常駐アプリを起動** をオンにして **設定を保存** を押します。
 
 ### 初期設定のショートカット
